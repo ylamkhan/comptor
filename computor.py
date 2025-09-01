@@ -1,298 +1,400 @@
-#!/usr/bin/env python3
 import re
 import sys
 
-class PolynomialSolver:
-    def __init__(self):
-        self.coefficients = {}
-    
-    def parse_term(self, term):
-        """Parse a single term like '5 * X^2' or '-3.5 * X^1'"""
-        # Remove spaces
-        term = re.sub(r'\s+', '', term)
-        
-        # Handle cases like "X^2" (coefficient = 1)
-        if term.startswith('X^'):
-            return 1.0, int(term[2:])
-        elif term.startswith('-X^'):
-            return -1.0, int(term[3:])
-        elif term == 'X':
-            return 1.0, 1
-        elif term == '-X':
-            return -1.0, 1
-        
-        # Handle explicit coefficient cases
-        # Pattern: optional sign, number, *, X^, power
-        pattern = r'^([+-]?\d*\.?\d*)\*X\^(\d+)$'
-        match = re.match(pattern, term)
-        
-        if match:
-            coeff_str = match.group(1)
-            power = int(match.group(2))
-            
-            # Handle empty coefficient (means 1)
-            if coeff_str == '' or coeff_str == '+':
-                coefficient = 1.0
-            elif coeff_str == '-':
-                coefficient = -1.0
+def validate_and_normalize(equation: str):
+    if equation.count("=") != 1:
+        return False, "Equation must contain exactly one '=' sign", None, None
+    left, right = equation.split("=")
+    variables = re.findall(r"[a-zA-Z]", equation)
+    unique_vars = set(variables)
+    if not unique_vars:
+        return False, "Equation must contain at least one variable", None, None
+    if len(unique_vars) > 1:
+        return False, f"Equation must contain only ONE variable, found {unique_vars}", None, None
+    variable = unique_vars.pop()
+    term_pattern = re.compile(r"""
+        ^\s*
+        (?:
+            [+-]?\s*\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\s*
+            |
+            [+-]?\s*\d*(?:\.\d+)?(?:[eE][+-]?\d+)?\s*\*?\s*
+            {var}
+            (?:\^\s*[-]?\d+)?
+        )
+        \s*$
+    """.format(var=re.escape(variable)), re.VERBOSE)
+    def normalize_term(term):
+        term = term.strip().replace(" ", "")
+
+        # 1. Pure constant (e.g. 5, -3.2, +2e4)
+        if re.fullmatch(r"[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", term):
+            return f"{term}*{variable}^0"
+
+        # 2. Pure variable (x, -x, +x)
+        if re.fullmatch(r"[+-]?{v}".format(v=re.escape(variable)), term):
+            sign = "-" if term.startswith("-") else ""
+            return f"{sign}1*{variable}^1"
+
+        # 3. Variable with exponent but no coefficient (x^2, -x^3)
+        if re.fullmatch(r"[+-]?{v}\^-?\d+".format(v=re.escape(variable)), term):
+            sign = "-" if term.startswith("-") else ""
+            power = term.split("^")[1]
+            return f"{sign}1*{variable}^{power}"
+
+        # 4. Coefficient * variable (e.g. 3*x, -2.5*x, +4e2*x)
+        if re.fullmatch(r"[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\*{v}".format(v=re.escape(variable)), term):
+            coeff = term.replace(f"*{variable}", "")
+            return f"{coeff}*{variable}^1"
+
+        # 5. Coefficient * variable^power (e.g. 2*x^3, -0.5*x^-2)
+        if re.fullmatch(r"[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\*{v}\^-?\d+".format(v=re.escape(variable)), term):
+            return term
+
+        # 6. Fallback: insert missing pieces
+        if f"*{variable}" not in term:
+            term = term.replace(variable, f"*{variable}")
+        if "^" not in term:
+            term += "^1"
+        return term
+
+    def check_and_normalize_side(side):
+        side = side.replace("-", "+-").replace(" ", "")
+        tokens = [token for token in side.split('+') if token]
+        normalized = []
+        for token in tokens:
+            if not term_pattern.match(token):
+                return False, f"Invalid term: '{token}'", None
+            normalized.append(normalize_term(token))
+        return True, None, " + ".join(normalized)
+
+    ok_left, err_left, norm_left = check_and_normalize_side(left)
+    ok_right, err_right, norm_right = check_and_normalize_side(right)
+
+    if not ok_left: return False, err_left, None, None
+    if not ok_right: return False, err_right, None, None
+
+    normalized_eq = f"{norm_left} = {norm_right}"
+    return True, "Equation is valid", normalized_eq, variable
+
+
+def gcd(a, b):
+    """Calculate greatest common divisor"""
+    a, b = abs(a), abs(b)
+    while b != 0:
+        a, b = b, a % b
+    return a
+
+
+class SimpleFraction:
+    """Simple fraction class for exact arithmetic"""
+    def __init__(self, numerator, denominator=1):
+        if denominator == 0:
+            raise ValueError("Denominator cannot be zero")
+        if isinstance(numerator, float):
+            num_str = str(numerator)
+            if 'e' in num_str.lower():
+                numerator = float(numerator)
+                decimal_places = 10
+                multiplier = 10 ** decimal_places
+                numerator = int(numerator * multiplier)
+                denominator *= multiplier
+            elif '.' in num_str:
+                decimal_places = len(num_str.split('.')[1])
+                multiplier = 10 ** decimal_places
+                numerator = int(numerator * multiplier)
+                denominator *= multiplier
             else:
-                coefficient = float(coeff_str)
-            
-            return coefficient, power
+                numerator = int(numerator)
         
-        # Handle constant terms (X^0)
-        pattern_const = r'^([+-]?\d*\.?\d*)\*X\^0$'
-        match_const = re.match(pattern_const, term)
-        if match_const:
-            coeff_str = match_const.group(1)
-            if coeff_str == '' or coeff_str == '+':
-                coefficient = 1.0
-            elif coeff_str == '-':
-                coefficient = -1.0
+        if isinstance(denominator, float):
+            den_str = str(denominator)
+            if '.' in den_str:
+                decimal_places = len(den_str.split('.')[1])
+                multiplier = 10 ** decimal_places
+                numerator *= multiplier
+                denominator = int(denominator * multiplier)
             else:
-                coefficient = float(coeff_str)
-            return coefficient, 0
-        
-        # Handle pure numbers as X^0
-        pattern_num = r'^([+-]?\d*\.?\d*)$'
-        match_num = re.match(pattern_num, term)
-        if match_num and match_num.group(1):
-            return float(match_num.group(1)), 0
-            
-        raise ValueError(f"Invalid term format: {term}")
+                denominator = int(denominator)
+        g = gcd(numerator, denominator)
+        self.numerator = numerator // g
+        self.denominator = denominator // g
+        if self.denominator < 0:
+            self.numerator *= -1
+            self.denominator *= -1
     
-    def parse_equation(self, equation_str):
-        """Parse the entire equation and return coefficients dictionary"""
-        # Split by '='
-        if '=' not in equation_str:
-            raise ValueError("No '=' found in equation")
-        
-        left_side, right_side = equation_str.split('=', 1)
-        
-        # Parse both sides
-        left_coeffs = self.parse_side(left_side)
-        right_coeffs = self.parse_side(right_side)
-        
-        # Move everything to left side (subtract right side)
-        all_coeffs = {}
-        
-        # Add left side coefficients
-        for power, coeff in left_coeffs.items():
-            all_coeffs[power] = all_coeffs.get(power, 0) + coeff
-        
-        # Subtract right side coefficients
-        for power, coeff in right_coeffs.items():
-            all_coeffs[power] = all_coeffs.get(power, 0) - coeff
-        
-        # Remove zero coefficients
-        self.coefficients = {k: v for k, v in all_coeffs.items() if abs(v) > 1e-10}
-        
-        return self.coefficients
+    def __add__(self, other):
+        if isinstance(other, (int, float)):
+            other = SimpleFraction(other)
+        num = self.numerator * other.denominator + other.numerator * self.denominator
+        den = self.denominator * other.denominator
+        return SimpleFraction(num, den)
     
-    def parse_side(self, side_str):
-        """Parse one side of the equation"""
-        coeffs = {}
-        
-        # Add explicit + at the beginning if the first term doesn't have a sign
-        side_str = side_str.strip()
-        if not side_str.startswith(('+', '-')):
-            side_str = '+' + side_str
-        
-        # Split by + and - while keeping the signs
-        terms = re.split(r'(?=[+-])', side_str)
-        terms = [term.strip() for term in terms if term.strip()]
-        
-        for term in terms:
-            if not term:
-                continue
-            try:
-                coeff, power = self.parse_term(term)
-                coeffs[power] = coeffs.get(power, 0) + coeff
-            except ValueError as e:
-                print(f"Error parsing term '{term}': {e}")
-                raise
-        
-        return coeffs
+    def __sub__(self, other):
+        if isinstance(other, (int, float)):
+            other = SimpleFraction(other)
+        num = self.numerator * other.denominator - other.numerator * self.denominator
+        den = self.denominator * other.denominator
+        return SimpleFraction(num, den)
     
-    def get_reduced_form(self):
-        """Return the reduced form string"""
-        if not self.coefficients:
-            return "0 = 0"
-        
-        terms = []
-        max_power = max(self.coefficients.keys()) if self.coefficients else 0
-        
-        # Sort powers in ascending order for display
-        for power in sorted(self.coefficients.keys()):
-            coeff = self.coefficients[power]
-            
-            if abs(coeff) < 1e-10:  # Skip near-zero coefficients
-                continue
-                
-            # Format coefficient
-            if len(terms) == 0:  # First term
-                if coeff == 1.0 and power > 0:
-                    coeff_str = ""
-                elif coeff == -1.0 and power > 0:
-                    coeff_str = "-"
-                elif coeff == int(coeff):
-                    coeff_str = str(int(coeff))
-                else:
-                    coeff_str = str(coeff)
-            else:  # Subsequent terms
-                if coeff > 0:
-                    if coeff == 1.0 and power > 0:
-                        coeff_str = " + "
-                    elif coeff == int(coeff):
-                        coeff_str = f" + {int(coeff)}"
-                    else:
-                        coeff_str = f" + {coeff}"
-                else:
-                    if coeff == -1.0 and power > 0:
-                        coeff_str = " - "
-                    elif coeff == int(coeff):
-                        coeff_str = f" - {int(abs(coeff))}"
-                    else:
-                        coeff_str = f" - {abs(coeff)}"
-            
-            # Add power part
-            if power == 0:
-                if coeff_str in ["", " + ", " - "]:
-                    coeff_str += "1"
-                power_str = " * X^0"
-            elif power == 1:
-                if coeff_str in ["", " + "]:
-                    coeff_str += "1"
-                elif coeff_str == " - ":
-                    coeff_str += "1"
-                power_str = " * X^1"
-            else:
-                if coeff_str in ["", " + "]:
-                    coeff_str += "1"
-                elif coeff_str == " - ":
-                    coeff_str += "1"
-                power_str = f" * X^{power}"
-            
-            terms.append(coeff_str + power_str)
-        
-        if not terms:
-            return "0 = 0"
-        
-        return "".join(terms) + " = 0"
+    def __mul__(self, other):
+        if isinstance(other, (int, float)):
+            other = SimpleFraction(other)
+        return SimpleFraction(self.numerator * other.numerator, self.denominator * other.denominator)
     
-    def get_degree(self):
-        """Return the degree of the polynomial"""
-        if not self.coefficients:
-            return 0
-        return max(self.coefficients.keys())
+    def __truediv__(self, other):
+        if isinstance(other, (int, float)):
+            other = SimpleFraction(other)
+        return SimpleFraction(self.numerator * other.denominator, self.denominator * other.numerator)
     
-    def solve(self):
-        """Solve the polynomial equation"""
-        degree = self.get_degree()
-        
-        if degree == 0:
-            # Constant equation
-            const = self.coefficients.get(0, 0)
-            if abs(const) < 1e-10:
-                return "Any real number is a solution."
-            else:
-                return "No solution."
-        
-        elif degree == 1:
-            # Linear equation: ax + b = 0 -> x = -b/a
-            a = self.coefficients.get(1, 0)
-            b = self.coefficients.get(0, 0)
-            
-            if abs(a) < 1e-10:
-                return "No solution." if abs(b) > 1e-10 else "Any real number is a solution."
-            
-            solution = -b / a
-            return f"The solution is:\n{solution:g}"
-        
-        elif degree == 2:
-            # Quadratic equation: ax² + bx + c = 0
-            a = self.coefficients.get(2, 0)
-            b = self.coefficients.get(1, 0)
-            c = self.coefficients.get(0, 0)
-            
-            if abs(a) < 1e-10:
-                # Actually a linear equation
-                if abs(b) < 1e-10:
-                    return "No solution." if abs(c) > 1e-10 else "Any real number is a solution."
-                solution = -c / b
-                return f"The solution is:\n{solution:g}"
-            
-            # Calculate discriminant
-            discriminant = b*b - 4*a*c
-            
-            if discriminant > 1e-10:
-                # Two real solutions
-                sqrt_d = (discriminant)**(1/2)
-                x1 = (-b + sqrt_d) / (2*a)
-                x2 = (-b - sqrt_d) / (2*a)
-                return f"Discriminant is strictly positive, the two solutions are:\n{x1:g}\n{x2:g}"
-            
-            elif abs(discriminant) <= 1e-10:
-                # One real solution (repeated root)
-                x = -b / (2*a)
-                return f"Discriminant is zero, the solution is:\n{x:g}"
-            
-            else:
-                # Complex solutions
-                sqrt_d = (abs(discriminant))**0.5
-                real_part = -b / (2*a)
-                imag_part = sqrt_d / (2*a)
-                
-                if abs(real_part) < 1e-10:
-                    real_part = 0
-                if abs(imag_part) < 1e-10:
-                    imag_part = 0
-                
-                # Format complex numbers nicely
-                if real_part == 0:
-                    if imag_part == 1:
-                        return f"Discriminant is strictly negative, the two complex solutions are:\ni\n-i"
-                    elif imag_part == -1:
-                        return f"Discriminant is strictly negative, the two complex solutions are:\n-i\ni"
-                    else:
-                        return f"Discriminant is strictly negative, the two complex solutions are:\n{imag_part:g}i\n{-imag_part:g}i"
-                else:
-                    if imag_part == 1:
-                        return f"Discriminant is strictly negative, the two complex solutions are:\n{real_part:g} + i\n{real_part:g} - i"
-                    elif imag_part == -1:
-                        return f"Discriminant is strictly negative, the two complex solutions are:\n{real_part:g} - i\n{real_part:g} + i"
-                    else:
-                        return f"Discriminant is strictly negative, the two complex solutions are:\n{real_part:g} + {imag_part:g}i\n{real_part:g} - {imag_part:g}i"
-        
+    def __neg__(self):
+        return SimpleFraction(-self.numerator, self.denominator)
+
+
+def display_solution_enhanced(numerator, denominator, show_steps=True):
+    """Enhanced solution display with detailed steps and smart fraction logic"""
+    
+    if show_steps:
+        print(f"\nSimplifying the solution:")
+        print(f"  Original fraction: {numerator}/{denominator}")
+    
+    if denominator == 0:
+        if numerator == 0:
+            print("Infinite solutions")
         else:
-            return f"The polynomial degree is strictly greater than 2, I can't solve."
+            print("No solution")
+        return
+    g = gcd(numerator, denominator)
+    if show_steps and g > 1:
+        print(f"  GCD({abs(numerator)}, {abs(denominator)}) = {g}")
+    
+    orig_num, orig_den = numerator, denominator
+    numerator //= g
+    denominator //= g
+    
+    if show_steps and g > 1:
+        print(f"  Simplified: {numerator}/{denominator}")
+    if denominator < 0:
+        numerator *= -1
+        denominator *= -1
+        if show_steps:
+            print(f"  Moving negative to numerator: {numerator}/{denominator}")
+    solution_decimal = numerator / denominator
+    is_integer = denominator == 1
+    is_simple_fraction = (denominator <= 20 and abs(numerator) <= 100)
+    is_very_long_decimal = len(f"{solution_decimal:.10f}".rstrip('0')) > 8
+    if is_integer:
+        print(f"The solution is: {numerator}")
+    elif is_simple_fraction or is_very_long_decimal:
+        print(f"The solution is: {numerator}/{denominator} (irreducible fraction)")
+        if abs(solution_decimal) > 0.0001:
+            print(f"Decimal form: {solution_decimal:.6g}")
+    else:
+        print(f"The solution is: {solution_decimal:.6g}")
+        if denominator <= 1000:
+            print(f"Exact fraction: {numerator}/{denominator}")
+
+
+def is_perfect_square(n):
+    """Check if a number is a perfect square"""
+    if n < 0:
+        return False
+    if isinstance(n, float):
+        sqrt_n = n ** 0.5
+        int_sqrt = int(round(sqrt_n))
+        return abs(int_sqrt * int_sqrt - n) < 1e-10
+    sqrt_n = int(n ** 0.5)
+    return sqrt_n * sqrt_n == n
+
+
+def parse_and_solve_real(normalized_eq: str, variable: str):
+    print(f"Normalized equation: {normalized_eq}")
+    
+    left, right = normalized_eq.split("=")
+    term_pattern = re.compile(r"([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\*{var}\^([-]?\d+)".format(var=re.escape(variable)))
+    
+    def extract_terms(side):
+        terms = {}
+        print(f"\nExtracting terms from: {side}")
+        for match in term_pattern.finditer(side.replace(" ", "")):
+            coeff, power = float(match.group(1)), int(match.group(2))
+            terms[power] = terms.get(power, 0) + coeff
+            print(f"  Found term: {coeff} * {variable}^{power}")
+        return terms
+    
+    left_terms = extract_terms(left)
+    right_terms = extract_terms(right)
+    print(f"\nMoving all terms to left side (Left - Right = 0):")
+    coeffs = {}
+    for p in set(left_terms) | set(right_terms):
+        left_coeff = left_terms.get(p, 0)
+        right_coeff = right_terms.get(p, 0)
+        coeffs[p] = left_coeff - right_coeff
+        if left_coeff != 0 or right_coeff != 0:
+            print(f"  {variable}^{p}: {left_coeff} - ({right_coeff}) = {coeffs[p]}")
+    coeffs = {p: c for p, c in coeffs.items() if c != 0}
+    parts = []
+    sorted_powers = sorted(coeffs.keys(), reverse=True)
+    if not sorted_powers:
+        reduced_form = "0"
+    else:
+        for i, power in enumerate(sorted_powers):
+            coeff = coeffs[power]
+            coeff_rep = int(coeff) if coeff == int(coeff) else coeff
+            abs_coeff = abs(coeff_rep)
+            if i == 0:
+                sign = "-" if coeff < 0 else ""
+            else:
+                sign = " - " if coeff < 0 else " + "
+            if power == 0:
+                term = str(abs_coeff)
+            else:
+                var_part = variable
+                if power != 1:
+                    var_part += f"^{power}"
+                
+                if abs_coeff == 1:
+                    term = var_part
+                else:
+                    term = f"{abs_coeff} * {var_part}"
+            parts.append(f"{sign}{term}")
+        reduced_form = "".join(parts)
+    
+    print(f"\nReduced form: {reduced_form} = 0")
+    degree = max(coeffs.keys()) if coeffs else 0
+    print(f"Polynomial degree: {degree}")
+    
+    if any(p < 0 for p in coeffs.keys()):
+        print("Error: The equation involves negative powers, which is not a polynomial.")
+        return
+    
+    if degree > 2:
+        print("The polynomial degree is strictly greater than 2, I can't solve.")
+        return
+
+    if degree == 0:
+        if not coeffs:
+            print("\nAll real numbers are solutions (infinite solutions).")
+        else:
+            print("\nThe equation is false, there is no solution.")
+        return
+
+    if degree == 1:
+        print("\nThis is a linear equation.")
+        a = coeffs.get(1, 0)
+        b = coeffs.get(0, 0)
+        print(f"Standard form: {a} * {variable} + {b} = 0")
+        print(f"\nStep-by-step solution:")
+        print(f"  {a} * {variable} + {b} = 0")
+        print(f"  {a} * {variable} = -{b}")
+        print(f"  {variable} = -{b}/{a}")
+        b_frac = SimpleFraction(b)
+        a_frac = SimpleFraction(a)
+        solution = -b_frac / a_frac
+        
+        display_solution_enhanced(solution.numerator, solution.denominator)
+
+    if degree == 2:
+        a = coeffs.get(2, 0)
+        b = coeffs.get(1, 0)
+        c = coeffs.get(0, 0)
+        print("\nThis is a quadratic equation.")
+        print(f"Standard form: {a} * {variable}^2 + {b} * {variable} + {c} = 0")
+        print(f"Coefficients: a = {a}, b = {b}, c = {c}")
+        
+        print(f"\nUsing the quadratic formula:")
+        print(f"  {variable} = (-b ± √(b² - 4ac)) / (2a)")
+        print(f"  {variable} = (-({b}) ± √(({b})² - 4*({a})*({c}))) / (2*{a})")
+        
+        print(f"\nStep 1: Calculate the discriminant (Δ = b² - 4ac)")
+        print(f"  Δ = ({b})² - 4*({a})*({c})")
+        print(f"  Δ = {b**2} - {4*a*c}")
+        disc = b**2 - 4*a*c
+        print(f"  Δ = {disc}")
+
+        if disc < 0:
+            print("\nStep 2: Analyze the discriminant")
+            print("Result: Discriminant is strictly negative.")
+            print("There are no real solutions (solutions are complex).")
+        elif disc == 0:
+            print("\nStep 2: Analyze the discriminant")
+            print("Result: Discriminant is zero, there is one real solution (repeated root).")
+            print(f"\nStep 3: Apply the formula")
+            print(f"  {variable} = -b / (2*a)")
+            print(f"  {variable} = -({b}) / (2*{a})")
+            print(f"  {variable} = {-b} / {2*a}")
+            b_frac = SimpleFraction(b)
+            a_frac = SimpleFraction(a)
+            solution = -b_frac / (SimpleFraction(2) * a_frac)
+            
+            display_solution_enhanced(solution.numerator, solution.denominator)
+        else:
+            print("\nStep 2: Analyze the discriminant")
+            print("Result: Discriminant is strictly positive, there are two real solutions.")
+            
+            sqrt_disc = disc ** 0.5
+            is_perfect_square_disc = is_perfect_square(disc)
+            
+            print(f"\nStep 3: Calculate √Δ")
+            if is_perfect_square_disc:
+                sqrt_disc_int = int(sqrt_disc)
+                print(f"  √{disc} = {sqrt_disc_int} (perfect square)")
+                print("The solutions will be rational numbers.")
+                
+                print(f"\nStep 4: Apply the quadratic formula")
+                b_frac = SimpleFraction(b)
+                a_frac = SimpleFraction(a)
+                
+                print(f"\nSolution 1: {variable} = (-b - √Δ) / (2a)")
+                print(f"  = (-({b}) - {sqrt_disc_int}) / (2*{a})")
+                print(f"  = ({-b} - {sqrt_disc_int}) / {2*a}")
+                print(f"  = {-b - sqrt_disc_int} / {2*a}")
+                
+                sol1 = (-b_frac - SimpleFraction(sqrt_disc_int)) / (SimpleFraction(2) * a_frac)
+                display_solution_enhanced(sol1.numerator, sol1.denominator, show_steps=False)
+                
+                print(f"\nSolution 2: {variable} = (-b + √Δ) / (2a)")
+                print(f"  = (-({b}) + {sqrt_disc_int}) / (2*{a})")
+                print(f"  = ({-b} + {sqrt_disc_int}) / {2*a}")
+                print(f"  = {-b + sqrt_disc_int} / {2*a}")
+                
+                sol2 = (-b_frac + SimpleFraction(sqrt_disc_int)) / (SimpleFraction(2) * a_frac)
+                display_solution_enhanced(sol2.numerator, sol2.denominator, show_steps=False)
+            else:
+                print(f"  √{disc} ≈ {sqrt_disc:.6g} (not a perfect square)")
+                print("The solutions will be irrational numbers.")
+                
+                print(f"\nStep 4: Apply the quadratic formula")
+                print(f"Solution 1: {variable} = (-{b} - √{disc}) / {2*a}")
+                sol1 = (-b - sqrt_disc) / (2*a)
+                print(f"  ≈ {sol1:.8g}")
+                
+                print(f"\nSolution 2: {variable} = (-{b} + √{disc}) / {2*a}")
+                sol2 = (-b + sqrt_disc) / (2*a)
+                print(f"  ≈ {sol2:.8g}")
+
 
 def main():
     if len(sys.argv) != 2:
-        print("Usage: python computor.py \"equation\"")
-        return
+        print("Usage: python computor.py \"<equation>\"")
+        sys.exit(1)
     
-    equation = sys.argv[1]
-    solver = PolynomialSolver()
+    eq = sys.argv[1]
+    print("="*60)
+    print("POLYNOMIAL EQUATION SOLVER")
+    print("="*60)
     
-    try:
-        # Parse the equation
-        solver.parse_equation(equation)
-        
-        # Display reduced form
-        reduced_form = solver.get_reduced_form()
-        print(f"Reduced form: {reduced_form}")
-        
-        # Display degree
-        degree = solver.get_degree()
-        print(f"Polynomial degree: {degree}")
-        
-        # Solve and display solution
-        solution = solver.solve()
-        print(solution)
-        
-    except Exception as e:
-        print(f"Error: {e}")
+    valid, msg, norm, variable = validate_and_normalize(eq)
+    
+    if not valid:
+        print(f"Error parsing equation: {msg}")
+        sys.exit(1)
+    
+    print(f"Input equation: \"{eq}\"")
+    print(f"Variable detected: {variable}")
+    print("-" * 60)
+    parse_and_solve_real(norm, variable)
+    print("=" * 60)
+
 
 if __name__ == "__main__":
     main()

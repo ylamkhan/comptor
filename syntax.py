@@ -49,3 +49,36 @@ def validate_and_normalize(equation: str):
     if not ok_right: return False, err_right, None, None
 
     return True, "Equation is valid", f"{norm_left} = {norm_right}", variable
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        def normalize_term(term):
+        term = term.strip().replace(" ", "")
+        if re.fullmatch(r"[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", term):
+            return f"{term}*{variable}^0"
+        if re.fullmatch(r"[+-]?{v}".format(v=re.escape(variable)), term):
+            sign = "-" if term.startswith("-") else ""
+            return f"{sign}1*{variable}^1"
+        if re.fullmatch(r"[+-]?\d*(?:\.\d+)?(?:[eE][+-]?\d+)?\*{v}".format(v=re.escape(variable)), term):
+            coeff = term.replace(f"*{variable}", "")
+            if coeff in ("", "+"): return f"1*{variable}^1"
+            if coeff == "-": return f"-1*{variable}^1"
+            return f"{coeff}*{variable}^1"
+        if f'*{variable}' not in term:
+             term = term.replace(variable, f'*{variable}')
+        if '^' not in term:
+            term += '^1'
+        return term
